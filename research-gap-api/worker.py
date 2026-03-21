@@ -8,7 +8,9 @@ from prompts import (CHUNK_SYSTEM, SYNTHESIS_SYSTEM,
 from datetime import datetime
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-celery_app = Celery("research_gaps", broker=REDIS_URL, backend=REDIS_URL)
+celery_app = Celery("research_gaps", broker=REDIS_URL, backend=REDIS_URL,
+                    broker_use_ssl={"ssl_cert_reqs": None},
+                    redis_backend_use_ssl={"ssl_cert_reqs": None})
 celery_app.conf.task_serializer = "json"
 
 claude = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
