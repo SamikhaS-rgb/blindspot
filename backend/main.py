@@ -2,6 +2,7 @@ import json, os, uuid
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, BackgroundTasks
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 import fitz
@@ -188,3 +189,9 @@ def list_jobs(db: Session = Depends(get_db)):
         }
         for j in jobs
     ]
+
+
+# ── Serve React frontend (must be last — catches all unmatched routes) ─────
+FRONTEND_DIST = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
+if os.path.isdir(FRONTEND_DIST):
+    app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="static")
