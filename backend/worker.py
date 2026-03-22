@@ -9,7 +9,7 @@ from prompts import (CHUNK_SYSTEM, SYNTHESIS_SYSTEM,
                      chunk_user_prompt, synthesis_user_prompt)
 from datetime import datetime
 
-genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+genai.configure(api_key=os.environ["ANTHROPIC_API_KEY"])
 model = genai.GenerativeModel(
     model_name="gemini-1.5-flash",
     generation_config={"response_mime_type": "application/json"}
