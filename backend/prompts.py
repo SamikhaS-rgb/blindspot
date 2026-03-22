@@ -1,5 +1,6 @@
 CHUNK_SYSTEM = """You are a research gap analyst. Analyze the provided papers (a chunk
 from a larger corpus) and extract ONLY structured findings. Do not summarize.
+Be concise. Limit each list to the top 3 most significant findings per category.
 
 Return JSON only — no markdown fences:
 {
