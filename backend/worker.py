@@ -28,8 +28,14 @@ def call_claude_sync(system: str, user: str, use_search: bool = False) -> dict:
         kwargs["max_tokens"] = 2000
         kwargs["tools"] = [{"type": "web_search_20250305", "name": "web_search"}]
 
-    resp = claude.messages.create(**kwargs)
+    print(f"[DEBUG] model={kwargs['model']} use_search={use_search} system_len={len(system)} user_len={len(user)}", flush=True)
+    try:
+        resp = claude.messages.create(**kwargs)
+    except Exception as e:
+        print(f"[ERROR] Claude API failed: {type(e).__name__}: {e}", flush=True)
+        raise
     text = "".join(b.text for b in resp.content if b.type == "text")
+    print(f"[DEBUG] Response preview: {text[:200]}", flush=True)
     return json.loads(text.replace("```json", "").replace("```", "").strip())
 
 
@@ -82,6 +88,7 @@ async def process_chunk(job_id: str, chunk_index: int,
         db.commit()
 
     except Exception as e:
+        print(f"[ERROR] process_chunk failed: {type(e).__name__}: {e}", flush=True)
         db.query(Job).filter_by(id=job_id).update(
             {"status": "failed", "error": str(e)[:500]}
         )
@@ -124,6 +131,7 @@ async def synthesize(job_id: str, filters: list[str]) -> None:
         db.commit()
 
     except Exception as e:
+        print(f"[ERROR] synthesize failed: {type(e).__name__}: {e}", flush=True)
         db.query(Job).filter_by(id=job_id).update(
             {"status": "failed", "error": str(e)[:500]}
         )
