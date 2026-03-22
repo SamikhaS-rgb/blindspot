@@ -2,48 +2,42 @@
 # No Redis, no separate worker process needed.
 
 import json, os, asyncio
-import anthropic
+import google.generativeai as genai
 from tenacity import retry, stop_after_attempt, wait_exponential
 from models import SessionLocal, Job, Finding, Report
 from prompts import (CHUNK_SYSTEM, SYNTHESIS_SYSTEM,
                      chunk_user_prompt, synthesis_user_prompt)
 from datetime import datetime
 
-claude = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+model = genai.GenerativeModel(
+    model_name="gemini-1.5-flash",
+    generation_config={"response_mime_type": "application/json"}
+)
 
 CHUNK_SIZE = 3  # papers per chunk
 
 
-# ── Claude call (sync, run in thread pool) ────────────────────────────────
+# ── Gemini call (sync, run in thread pool) ─────────────────────────────────
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=20))
-def call_claude_sync(system: str, user: str, use_search: bool = False) -> dict:
-    kwargs = dict(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=1500,
-        system=system,
-        messages=[{"role": "user", "content": user}],
-    )
-    if use_search:
-        kwargs["model"] = "claude-sonnet-4-5-20250929"
-        kwargs["max_tokens"] = 2000
-        kwargs["tools"] = [{"type": "web_search_20250305", "name": "web_search"}]
-
-    print(f"[DEBUG] model={kwargs['model']} use_search={use_search} system_len={len(system)} user_len={len(user)}", flush=True)
+def call_gemini_sync(system: str, user: str) -> dict:
+    prompt = f"{system}\n\n{user}"
+    print(f"[DEBUG] Calling Gemini prompt_len={len(prompt)}", flush=True)
     try:
-        resp = claude.messages.create(**kwargs)
+        resp = model.generate_content(prompt)
     except Exception as e:
-        print(f"[ERROR] Claude API failed: {type(e).__name__}: {e}", flush=True)
+        print(f"[ERROR] Gemini API failed: {type(e).__name__}: {e}", flush=True)
         raise
-    text = "".join(b.text for b in resp.content if b.type == "text")
+    text = resp.text.replace("```json", "").replace("```", "").strip()
     print(f"[DEBUG] Response preview: {text[:200]}", flush=True)
-    return json.loads(text.replace("```json", "").replace("```", "").strip())
+    return json.loads(text)
 
 
 # ── Async wrapper so we don't block FastAPI's event loop ──────────────────
-async def call_claude(system: str, user: str, use_search: bool = False) -> dict:
+async def call_gemini(system: str, user: str) -> dict:
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(
-        None, lambda: call_claude_sync(system, user, use_search)
+        None, lambda: call_gemini_sync(system, user)
     )
 
 
@@ -56,11 +50,9 @@ async def process_chunk(job_id: str, chunk_index: int,
         if job and job.status == "cancelled":
             return
 
-        use_search = papers_text.startswith("[TOPIC SEARCH:")
-        result = await call_claude(
+        result = await call_gemini(
             CHUNK_SYSTEM,
             chunk_user_prompt(papers_text, filters),
-            use_search=use_search
         )
 
         job = db.query(Job).filter_by(id=job_id).first()
@@ -114,10 +106,9 @@ async def synthesize(job_id: str, filters: list[str]) -> None:
             for f in findings
         )
 
-        result = await call_claude(
+        result = await call_gemini(
             SYNTHESIS_SYSTEM,
             synthesis_user_prompt(all_text, job.total_papers, filters),
-            use_search=False
         )
 
         db.add(Report(
