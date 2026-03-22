@@ -20,7 +20,8 @@ def get_db():
 class Job(Base):
     __tablename__ = "jobs"
     id           = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    status       = Column(String, default="queued")   # queued|processing|done|failed
+    status       = Column(String, default="queued")   # queued|processing|synthesizing|done|failed|cancelled
+    job_name     = Column(String, nullable=True, default="")
     topic        = Column(String, nullable=True)
     total_papers = Column(Integer, default=0)
     chunks_done  = Column(Integer, default=0)
@@ -37,7 +38,7 @@ class Finding(Base):
     kind        = Column(String)   # gap|contradiction|methodology|suggestion
     title       = Column(String)
     description = Column(Text)
-    detail      = Column(Text)     # JSON blob of extra fields
+    detail      = Column(Text)     # JSON blob
     severity    = Column(String, nullable=True)
     chunk_index = Column(Integer)
 

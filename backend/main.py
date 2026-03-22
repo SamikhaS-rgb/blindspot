@@ -10,7 +10,7 @@ from models import get_db, Job, Finding, Report
 from worker import celery_app, analyze_chunk, CHUNK_SIZE
 from exporters import build_pdf, build_docx
 
-app = FastAPI(title="Research Gap Finder — Advanced")
+app = FastAPI(title="Blindspot — Research Gap Finder")
 app.add_middleware(CORSMiddleware, allow_origins=["*"],
                    allow_methods=["*"], allow_headers=["*"])
 
@@ -49,20 +49,22 @@ def health():
 
 
 class TextJobRequest(BaseModel):
-    texts: list[str]          # one string per paper
+    texts: list[str]
     filters: list[str] = DEFAULT_FILTERS
+    job_name: str = ""
 
 
 class TopicJobRequest(BaseModel):
     topic: str
     filters: list[str] = DEFAULT_FILTERS
+    job_name: str = ""
 
 
 @app.post("/jobs/text", status_code=202)
 def create_text_job(req: TextJobRequest, db: Session = Depends(get_db)):
     if not req.texts:
         raise HTTPException(400, "texts list is empty")
-    job = Job(id=str(uuid.uuid4()))
+    job = Job(id=str(uuid.uuid4()), job_name=req.job_name)
     db.add(job)
     db.commit()
     enqueue_job(job.id, req.texts, req.filters, db)
@@ -74,6 +76,7 @@ def create_text_job(req: TextJobRequest, db: Session = Depends(get_db)):
 async def create_pdf_job(
     files: list[UploadFile] = File(...),
     filters: str = ",".join(DEFAULT_FILTERS),
+    job_name: str = "",
     db: Session = Depends(get_db),
 ):
     filter_list = [f.strip() for f in filters.split(",")]
@@ -82,7 +85,7 @@ async def create_pdf_job(
         raw = await f.read()
         papers.append(f"[{f.filename}]\n{extract_text(raw)}")
 
-    job = Job(id=str(uuid.uuid4()))
+    job = Job(id=str(uuid.uuid4()), job_name=job_name)
     db.add(job)
     db.commit()
     enqueue_job(job.id, papers, filter_list, db)
@@ -92,11 +95,9 @@ async def create_pdf_job(
 
 @app.post("/jobs/topic", status_code=202)
 def create_topic_job(req: TopicJobRequest, db: Session = Depends(get_db)):
-    from worker import celery_app
-    from worker import synthesize_job
-    # Topic jobs: single task that uses web search, then synthesizes
     job = Job(id=str(uuid.uuid4()), topic=req.topic,
-              chunks_total=1, total_papers=0, status="processing")
+              chunks_total=1, total_papers=0, status="processing",
+              job_name=req.job_name or req.topic[:60])
     db.add(job)
     db.commit()
     analyze_chunk.delay(job.id, 0,
@@ -112,11 +113,29 @@ def get_job(job_id: str, db: Session = Depends(get_db)):
     progress = (job.chunks_done / job.chunks_total * 100) if job.chunks_total else 0
     return {
         "job_id": job.id, "status": job.status,
+        "job_name": job.job_name or "",
         "progress_pct": round(progress, 1),
         "chunks_done": job.chunks_done, "chunks_total": job.chunks_total,
         "papers": job.total_papers, "error": job.error,
         "created_at": job.created_at, "finished_at": job.finished_at,
     }
+
+
+@app.post("/jobs/{job_id}/cancel")
+def cancel_job(job_id: str, db: Session = Depends(get_db)):
+    """Cancel a running or queued job."""
+    job = db.query(Job).filter_by(id=job_id).first()
+    if not job:
+        raise HTTPException(404, "Job not found")
+    if job.status in ("done", "failed", "cancelled"):
+        raise HTTPException(400, f"Job is already {job.status}")
+    
+    # Revoke all pending celery tasks for this job
+    celery_app.control.revoke(job_id, terminate=True, signal='SIGTERM')
+    
+    job.status = "cancelled"
+    db.commit()
+    return {"job_id": job_id, "status": "cancelled"}
 
 
 @app.get("/jobs/{job_id}/report")
@@ -128,10 +147,10 @@ def get_report(job_id: str, db: Session = Depends(get_db)):
     return {
         "summary": report.summary,
         "stats": json.loads(report.stats),
-        "gaps":          [json.loads(f.detail) for f in findings if f.kind=="gap"],
-        "contradictions":[json.loads(f.detail) for f in findings if f.kind=="contradiction"],
-        "methodology":   [json.loads(f.detail) for f in findings if f.kind=="methodology"],
-        "suggestions":   [json.loads(f.detail) for f in findings if f.kind=="suggestion"],
+        "gaps":          [json.loads(f.detail) for f in findings if f.kind == "gap"],
+        "contradictions": [json.loads(f.detail) for f in findings if f.kind == "contradiction"],
+        "methodology":   [json.loads(f.detail) for f in findings if f.kind == "methodology"],
+        "suggestions":   [json.loads(f.detail) for f in findings if f.kind == "suggestion"],
     }
 
 
@@ -157,7 +176,6 @@ def download_docx(job_id: str, db: Session = Depends(get_db)):
                         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
 
-# Query findings across all jobs
 @app.get("/findings")
 def query_findings(kind: str = None, severity: str = None,
                    db: Session = Depends(get_db)):
@@ -168,15 +186,18 @@ def query_findings(kind: str = None, severity: str = None,
              "title": f.title, "description": f.description,
              "severity": f.severity} for f in q.all()]
 
+
 @app.get("/jobs")
 def list_jobs(db: Session = Depends(get_db)):
     jobs = db.query(Job).order_by(Job.created_at.desc()).limit(50).all()
     return [
         {
             "job_id": j.id, "status": j.status,
+            "job_name": j.job_name or "",
             "papers": j.total_papers,
             "created_at": j.created_at,
             "finished_at": j.finished_at
         }
         for j in jobs
     ]
+    
