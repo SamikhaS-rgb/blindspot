@@ -200,4 +200,3 @@ def list_jobs(db: Session = Depends(get_db)):
         }
         for j in jobs
     ]
-    
