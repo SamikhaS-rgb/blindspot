@@ -24,7 +24,7 @@ def call_claude_sync(system: str, user: str, use_search: bool = False) -> dict:
         messages=[{"role": "user", "content": user}],
     )
     if use_search:
-        kwargs["model"] = "claude-sonnet-4-20250514"
+        kwargs["model"] = "claude-sonnet-4-5"
         kwargs["max_tokens"] = 2000
         kwargs["tools"] = [{"type": "web_search_20250305", "name": "web_search"}]
 
@@ -36,7 +36,9 @@ def call_claude_sync(system: str, user: str, use_search: bool = False) -> dict:
 # ── Async wrapper so we don't block FastAPI's event loop ──────────────────
 async def call_claude(system: str, user: str, use_search: bool = False) -> dict:
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, call_claude_sync, system, user, use_search)
+    return await loop.run_in_executor(
+        None, lambda: call_claude_sync(system, user, use_search)
+    )
 
 
 # ── Process a single chunk ────────────────────────────────────────────────
@@ -154,14 +156,12 @@ async def run_job(job_id: str, papers: list[str], filters: list[str]) -> None:
         for idx, chunk in chunks
     ])
 
-    # Check not cancelled/failed before synthesizing
+    # Only synthesize if all chunks succeeded (status still "processing")
     db = SessionLocal()
     try:
         job = db.query(Job).filter_by(id=job_id).first()
-        if job and job.status == "processing":
-            pass  # proceed to synthesis
-        else:
-            return
+        if not job or job.status != "processing":
+            return  # cancelled or a chunk failed — stop here
     finally:
         db.close()
 
