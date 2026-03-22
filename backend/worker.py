@@ -7,11 +7,18 @@ from prompts import (CHUNK_SYSTEM, SYNTHESIS_SYSTEM,
                      chunk_user_prompt, synthesis_user_prompt)
 from datetime import datetime
 
+import ssl
+
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-celery_app = Celery("research_gaps", broker=REDIS_URL, backend=REDIS_URL,
-                    broker_use_ssl={"ssl_cert_reqs": None},
-                    redis_backend_use_ssl={"ssl_cert_reqs": None})
-celery_app.conf.task_serializer = "json"
+
+SSL_OPTS = {"ssl_cert_reqs": ssl.CERT_NONE}
+
+celery_app = Celery("research_gaps", broker=REDIS_URL, backend=REDIS_URL)
+celery_app.conf.update(
+    task_serializer="json",
+    broker_use_ssl=SSL_OPTS,
+    redis_backend_use_ssl=SSL_OPTS,
+)
 
 claude = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 CHUNK_SIZE = 10   # papers per chunk
