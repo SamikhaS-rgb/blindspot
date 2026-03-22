@@ -16,24 +16,27 @@ celery_app.conf.update(
     task_serializer="json",
     broker_use_ssl=SSL_OPTS,
     redis_backend_use_ssl=SSL_OPTS,
-    # Performance: run up to 4 tasks concurrently per worker
-    worker_concurrency=4,
-    # Use prefork for CPU-bound or gevent for I/O-bound (Claude API calls = I/O)
+    # Performance: 8 concurrent workers for I/O-bound Claude API calls
+    worker_concurrency=8,
     worker_pool="gevent",
     worker_prefetch_multiplier=1,
+    # Kill stuck tasks after 90s so they don't block the queue
+    task_soft_time_limit=90,
+    task_time_limit=120,
+    task_acks_late=True,
 )
 
 claude = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
 # ── PERFORMANCE TUNING ────────────────────────────────────────────────────
 # Smaller chunks = more parallel tasks = faster wall-clock time.
-# Trade-off: more API calls but they run concurrently.
-# If you have rate-limit headroom, lower this to 3 or even 2.
-CHUNK_SIZE = 5   # reduced from 10 for faster parallel processing
+# CHUNK_SIZE=3 means a 15-paper corpus spawns 5 parallel tasks instead of 3.
+# Lower = faster wall-clock; higher = fewer API calls. 3 is a good sweet spot.
+CHUNK_SIZE = 3   # reduced for faster parallel processing
 
 
 # ── Retry wrapper ─────────────────────────────────────────────────────────
-@retry(stop=stop_after_attempt(4), wait=wait_exponential(min=5, max=60))
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=20))
 def call_claude_sync(system: str, user: str, use_search: bool = False) -> dict:
     kwargs = dict(
         model="claude-haiku-4-5-20251001",  # Haiku: 3-4x faster + cheaper for chunk analysis
