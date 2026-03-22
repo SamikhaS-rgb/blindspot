@@ -24,7 +24,7 @@ def call_claude_sync(system: str, user: str, use_search: bool = False) -> dict:
         messages=[{"role": "user", "content": user}],
     )
     if use_search:
-        kwargs["model"] = "claude-sonnet-4-5"
+        kwargs["model"] = "claude-sonnet-4-5-20251001"
         kwargs["max_tokens"] = 2000
         kwargs["tools"] = [{"type": "web_search_20250305", "name": "web_search"}]
 
