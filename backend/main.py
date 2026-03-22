@@ -167,3 +167,16 @@ def query_findings(kind: str = None, severity: str = None,
     return [{"id": f.id, "job_id": f.job_id, "kind": f.kind,
              "title": f.title, "description": f.description,
              "severity": f.severity} for f in q.all()]
+
+@app.get("/jobs")
+def list_jobs(db: Session = Depends(get_db)):
+    jobs = db.query(Job).order_by(Job.created_at.desc()).limit(50).all()
+    return [
+        {
+            "job_id": j.id, "status": j.status,
+            "papers": j.total_papers,
+            "created_at": j.created_at,
+            "finished_at": j.finished_at
+        }
+        for j in jobs
+    ]
