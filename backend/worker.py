@@ -1,51 +1,29 @@
-import json, os
-from celery import Celery
-from tenacity import retry, stop_after_attempt, wait_exponential
+# worker.py — Celery-free async processing using asyncio
+# No Redis, no separate worker process needed.
+
+import json, os, asyncio
 import anthropic
+from tenacity import retry, stop_after_attempt, wait_exponential
 from models import SessionLocal, Job, Finding, Report
 from prompts import (CHUNK_SYSTEM, SYNTHESIS_SYSTEM,
                      chunk_user_prompt, synthesis_user_prompt)
 from datetime import datetime
-import ssl
-
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-SSL_OPTS = {"ssl_cert_reqs": ssl.CERT_NONE}
-
-celery_app = Celery("research_gaps", broker=REDIS_URL, backend=REDIS_URL)
-celery_app.conf.update(
-    task_serializer="json",
-    broker_use_ssl=SSL_OPTS,
-    redis_backend_use_ssl=SSL_OPTS,
-    # Performance: 8 concurrent workers for I/O-bound Claude API calls
-    worker_concurrency=8,
-    worker_pool="gevent",
-    worker_prefetch_multiplier=1,
-    # Kill stuck tasks after 90s so they don't block the queue
-    task_soft_time_limit=90,
-    task_time_limit=120,
-    task_acks_late=True,
-)
 
 claude = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
-# ── PERFORMANCE TUNING ────────────────────────────────────────────────────
-# Smaller chunks = more parallel tasks = faster wall-clock time.
-# CHUNK_SIZE=3 means a 15-paper corpus spawns 5 parallel tasks instead of 3.
-# Lower = faster wall-clock; higher = fewer API calls. 3 is a good sweet spot.
-CHUNK_SIZE = 3   # reduced for faster parallel processing
+CHUNK_SIZE = 3  # papers per chunk
 
 
-# ── Retry wrapper ─────────────────────────────────────────────────────────
+# ── Claude call (sync, run in thread pool) ────────────────────────────────
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=20))
 def call_claude_sync(system: str, user: str, use_search: bool = False) -> dict:
     kwargs = dict(
-        model="claude-haiku-4-5-20251001",  # Haiku: 3-4x faster + cheaper for chunk analysis
+        model="claude-haiku-4-5-20251001",
         max_tokens=1500,
         system=system,
         messages=[{"role": "user", "content": user}],
     )
     if use_search:
-        # Only synthesis/topic jobs use Sonnet + web search
         kwargs["model"] = "claude-sonnet-4-20250514"
         kwargs["max_tokens"] = 2000
         kwargs["tools"] = [{"type": "web_search_20250305", "name": "web_search"}]
@@ -55,31 +33,30 @@ def call_claude_sync(system: str, user: str, use_search: bool = False) -> dict:
     return json.loads(text.replace("```json", "").replace("```", "").strip())
 
 
-def is_cancelled(job_id: str, db) -> bool:
-    """Check if a job has been cancelled before doing expensive work."""
-    job = db.query(Job).filter_by(id=job_id).first()
-    return job and job.status == "cancelled"
+# ── Async wrapper so we don't block FastAPI's event loop ──────────────────
+async def call_claude(system: str, user: str, use_search: bool = False) -> dict:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, call_claude_sync, system, user, use_search)
 
 
-# ── Chunk analysis task ────────────────────────────────────────────────────
-@celery_app.task(bind=True)
-def analyze_chunk(self, job_id: str, chunk_index: int,
-                  papers_text: str, filters: list[str]):
+# ── Process a single chunk ────────────────────────────────────────────────
+async def process_chunk(job_id: str, chunk_index: int,
+                        papers_text: str, filters: list[str]) -> None:
     db = SessionLocal()
     try:
-        # Skip if job was cancelled
-        if is_cancelled(job_id, db):
+        job = db.query(Job).filter_by(id=job_id).first()
+        if job and job.status == "cancelled":
             return
 
         use_search = papers_text.startswith("[TOPIC SEARCH:")
-        result = call_claude_sync(
+        result = await call_claude(
             CHUNK_SYSTEM,
             chunk_user_prompt(papers_text, filters),
             use_search=use_search
         )
 
-        # Skip if cancelled while we were waiting for Claude
-        if is_cancelled(job_id, db):
+        job = db.query(Job).filter_by(id=job_id).first()
+        if job and job.status == "cancelled":
             return
 
         for gap in result.get("gaps", []):
@@ -99,12 +76,8 @@ def analyze_chunk(self, job_id: str, chunk_index: int,
                            title=s["direction"][:80], description=s["rationale"],
                            detail=json.dumps(s)))
 
-        job = db.query(Job).filter_by(id=job_id).first()
         job.chunks_done += 1
         db.commit()
-
-        if job.chunks_done >= job.chunks_total:
-            synthesize_job.delay(job_id, filters)
 
     except Exception as e:
         db.query(Job).filter_by(id=job_id).update(
@@ -115,15 +88,14 @@ def analyze_chunk(self, job_id: str, chunk_index: int,
         db.close()
 
 
-# ── Synthesis task ────────────────────────────────────────────────────────
-@celery_app.task
-def synthesize_job(job_id: str, filters: list[str]):
+# ── Synthesis ─────────────────────────────────────────────────────────────
+async def synthesize(job_id: str, filters: list[str]) -> None:
     db = SessionLocal()
     try:
-        if is_cancelled(job_id, db):
+        job = db.query(Job).filter_by(id=job_id).first()
+        if job and job.status == "cancelled":
             return
 
-        job = db.query(Job).filter_by(id=job_id).first()
         job.status = "synthesizing"
         db.commit()
 
@@ -133,8 +105,7 @@ def synthesize_job(job_id: str, filters: list[str]):
             for f in findings
         )
 
-        # Synthesis uses Sonnet for higher quality final report
-        result = call_claude_sync(
+        result = await call_claude(
             SYNTHESIS_SYSTEM,
             synthesis_user_prompt(all_text, job.total_papers, filters),
             use_search=False
@@ -151,9 +122,47 @@ def synthesize_job(job_id: str, filters: list[str]):
         db.commit()
 
     except Exception as e:
-        job = db.query(Job).filter_by(id=job_id).first()
-        job.status = "failed"
-        job.error = str(e)[:500]
+        db.query(Job).filter_by(id=job_id).update(
+            {"status": "failed", "error": str(e)[:500]}
+        )
         db.commit()
     finally:
         db.close()
+
+
+# ── Main entry point called by FastAPI BackgroundTasks ────────────────────
+async def run_job(job_id: str, papers: list[str], filters: list[str]) -> None:
+    """Process all chunks in parallel, then synthesize."""
+    db = SessionLocal()
+    try:
+        chunks = [
+            (i // CHUNK_SIZE, papers[i:i + CHUNK_SIZE])
+            for i in range(0, len(papers), CHUNK_SIZE)
+        ]
+
+        job = db.query(Job).filter_by(id=job_id).first()
+        job.chunks_total = len(chunks)
+        job.total_papers = len(papers)
+        job.status = "processing"
+        db.commit()
+    finally:
+        db.close()
+
+    # Run all chunks concurrently
+    await asyncio.gather(*[
+        process_chunk(job_id, idx, "\n\n---\n\n".join(chunk), filters)
+        for idx, chunk in chunks
+    ])
+
+    # Check not cancelled/failed before synthesizing
+    db = SessionLocal()
+    try:
+        job = db.query(Job).filter_by(id=job_id).first()
+        if job and job.status == "processing":
+            pass  # proceed to synthesis
+        else:
+            return
+    finally:
+        db.close()
+
+    await synthesize(job_id, filters)
